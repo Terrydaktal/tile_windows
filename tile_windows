@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROWS="${1:-1}"
+MATCH="${2:-xfce4-terminal}"   # WM_CLASS substring (case-insensitive)
+GAP=3                        # fixed gap between all windows (px)
+
+if ! [[ "$ROWS" =~ ^[0-9]+$ ]] || [ "$ROWS" -lt 1 ]; then
+  echo "Usage: tile_windows [rows>=1] [wm_class_substring]" >&2
+  exit 2
+fi
+
+for bin in python3 wmctrl xdotool xprop xwininfo xdpyinfo; do
+  command -v "$bin" >/dev/null || { echo "Missing: $bin" >&2; exit 2; }
+done
+
+# ----- helpers -------------------------------------------------------------
+
+get_screen_wh() {
+  local out
+  out="$(xdotool getdisplaygeometry 2>/dev/null || true)"
+  if [[ "$out" =~ ^[0-9]+[[:space:]]+[0-9]+$ ]]; then
+    echo "$out"
+    return
+  fi
+  out="$(xdpyinfo | awk '/dimensions:/ {print $2; exit}')"
+  echo "${out%x*} ${out#*x}"
+}
+
+# x y w h for a window (client geom; borderless == usable)
+win_geom() {
+  xwininfo -id "$1" 2>/dev/null | awk '
+    /Absolute upper-left X:/ {x=$NF}
+    /Absolute upper-left Y:/ {y=$NF}
+    /^  Width:/ {w=$NF}
+    /^  Height:/ {h=$NF}
+    END {print x+0, y+0, w+0, h+0}
+  '
+}
+
+# Workarea from wmctrl -d: WA: x,y WxH
+get_workarea_from_wmctrl() {
+  local desk="$1"
+  wmctrl -d | awk -v d="$desk" '
+    $1==d {
+      for (i=1;i<=NF;i++) if ($i=="WA:") {
+        split($(i+1),a,",");
+        split($(i+2),b,"x");
+        print a[1]+0, a[2]+0, b[1]+0, b[2]+0
+        exit
+      }
+    }'
+}
+
+# If WA equals full screen (panel not reserving struts), subtract xfce4-panel geometry.
+compute_workarea_with_panel_subtract() {
+  local sx="$1" sy="$2" sw="$3" sh="$4"
+  local top=0 bottom=0 left=0 right=0
+  local ids
+
+  ids="$(xdotool search --class xfce4-panel 2>/dev/null || true)"
+  [ -z "$ids" ] && { echo "$sx $sy $sw $sh"; return; }
+
+  while read -r wid; do
+    [ -z "$wid" ] && continue
+    read -r x y w h < <(win_geom "$wid") || continue
+
+    if (( y <= 3 && w >= sw-10 )); then (( h > top )) && top="$h"; fi
+    if (( y + h >= sh-3 && w >= sw-10 )); then (( h > bottom )) && bottom="$h"; fi
+    if (( x <= 3 && h >= sh-10 )); then (( w > left )) && left="$w"; fi
+    if (( x + w >= sw-3 && h >= sh-10 )); then (( w > right )) && right="$w"; fi
+  done <<<"$ids"
+
+  local wx=$(( sx + left ))
+  local wy=$(( sy + top ))
+  local ww=$(( sw - left - right ))
+  local wh=$(( sh - top - bottom ))
+  (( ww < 1 )) && ww=1
+  (( wh < 1 )) && wh=1
+  echo "$wx $wy $ww $wh"
+}
+
+# ----- desktop -------------------------------------------------------------
+
+DESK="$(xprop -root _NET_CURRENT_DESKTOP 2>/dev/null | awk -F'= ' '{print $2}' || true)"
+DESK="${DESK:-0}"
+
+# ----- collect windows -----------------------------------------------------
+
+MATCH_LC="${MATCH,,}"
+WIDS=()
+
+while read -r wid; do
+  wdesk="$(xprop -id "$wid" _NET_WM_DESKTOP 2>/dev/null | awk -F'= ' '{print $2}' | tr -d ',' || true)"
+  wdesk="${wdesk:-$DESK}"
+  [[ "$wdesk" != "$DESK" && "$wdesk" != "-1" ]] && continue
+
+  cls="$(xprop -id "$wid" WM_CLASS 2>/dev/null | sed -n 's/.*= //p' || true)"
+  [[ -z "${cls:-}" ]] && continue
+
+  [[ "${cls,,}" == *"$MATCH_LC"* ]] && WIDS+=("$wid")
+done < <(xdotool search --onlyvisible --name '.*' 2>/dev/null || true)
+
+COUNT="${#WIDS[@]}"
+if (( COUNT == 0 )); then
+  echo "No visible windows matched WM_CLASS containing: $MATCH" >&2
+  echo "Check with: xprop -id \$(xdotool getactivewindow) WM_CLASS" >&2
+  exit 1
+fi
+
+(( ROWS > COUNT )) && ROWS="$COUNT"
+
+# ----- workarea ------------------------------------------------------------
+
+read -r SW SH < <(get_screen_wh)
+SX=0; SY=0
+
+WA="$(get_workarea_from_wmctrl "$DESK" || true)"
+if [ -n "$WA" ]; then
+  read -r WORK_X WORK_Y WORK_W WORK_H <<<"$WA"
+else
+  WORK_X=$SX; WORK_Y=$SY; WORK_W=$SW; WORK_H=$SH
+fi
+
+# If WA still equals full screen, subtract panel(s)
+if (( WORK_X==SX && WORK_Y==SY && WORK_W==SW && WORK_H==SH )); then
+  read -r WORK_X WORK_Y WORK_W WORK_H < <(compute_workarea_with_panel_subtract "$SX" "$SY" "$SW" "$SH")
+fi
+
+# ----- build window centers + target cells ---------------------------------
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+win_tsv="$tmpdir/windows.tsv"
+cell_tsv="$tmpdir/cells.tsv"
+
+: > "$win_tsv"
+for wid in "${WIDS[@]}"; do
+  read -r x y w h < <(win_geom "$wid")
+  cx=$(( x + w / 2 ))
+  cy=$(( y + h / 2 ))
+  printf "%s\t%d\t%d\n" "$wid" "$cx" "$cy" >> "$win_tsv"
+done
+
+USABLE_H=$(( WORK_H - (ROWS - 1) * GAP ))
+(( USABLE_H < 1 )) && { echo "Gap too large for height." >&2; exit 2; }
+
+H_BASE=$(( USABLE_H / ROWS ))
+H_REM=$(( USABLE_H % ROWS ))
+
+idx=0
+: > "$cell_tsv"
+for ((r=0; r<ROWS; r++)); do
+  remaining=$(( COUNT - idx ))
+  rows_left=$(( ROWS - r ))
+  cols=$(( (remaining + rows_left - 1) / rows_left ))
+
+  USABLE_W=$(( WORK_W - (cols - 1) * GAP ))
+  (( USABLE_W < 1 )) && { echo "Gap too large for width." >&2; exit 2; }
+
+  W_BASE=$(( USABLE_W / cols ))
+  W_REM=$(( USABLE_W % cols ))
+
+  cell_h=$(( H_BASE + (r < H_REM ? 1 : 0) ))
+  y=$(( WORK_Y + r * (H_BASE + GAP) + (r < H_REM ? r : H_REM) ))
+
+  for ((c=0; c<cols && idx<COUNT; c++)); do
+    cell_w=$(( W_BASE + (c < W_REM ? 1 : 0) ))
+    x=$(( WORK_X + c * (W_BASE + GAP) + (c < W_REM ? c : W_REM) ))
+    cx=$(( x + cell_w / 2 ))
+    cy=$(( y + cell_h / 2 ))
+    printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\n" "$idx" "$x" "$y" "$cell_w" "$cell_h" "$cx" "$cy" >> "$cell_tsv"
+    idx=$((idx + 1))
+  done
+done
+
+# ----- assign windows to nearest cells (global minimum movement) ------------
+
+map_tsv="$tmpdir/map.tsv"
+
+python3 - "$win_tsv" "$cell_tsv" > "$map_tsv" <<'PY'
+import sys
+
+win_file, cell_file = sys.argv[1], sys.argv[2]
+
+wins = []
+with open(win_file, "r", encoding="utf-8") as f:
+    for line in f:
+        wid, cx, cy = line.rstrip("\n").split("\t")
+        wins.append((wid, int(cx), int(cy)))
+
+cells = []
+with open(cell_file, "r", encoding="utf-8") as f:
+    for line in f:
+        idx, x, y, w, h, cx, cy = line.rstrip("\n").split("\t")
+        cells.append((int(idx), int(cx), int(cy)))
+
+n = len(wins)
+if n != len(cells):
+    raise SystemExit("windows != cells")
+
+# cost[i][j] = squared distance from window i to cell j
+cost = [[0]*n for _ in range(n)]
+for i, (_, wx, wy) in enumerate(wins):
+    for j, (_, cx, cy) in enumerate(cells):
+        dx = wx - cx
+        dy = wy - cy
+        cost[i][j] = dx*dx + dy*dy
+
+# Hungarian algorithm (min-cost assignment), 1-indexed implementation
+INF = 10**30
+u = [0]*(n+1)
+v = [0]*(n+1)
+p = [0]*(n+1)
+way = [0]*(n+1)
+
+for i in range(1, n+1):
+    p[0] = i
+    j0 = 0
+    minv = [INF]*(n+1)
+    used = [False]*(n+1)
+    while True:
+        used[j0] = True
+        i0 = p[j0]
+        delta = INF
+        j1 = 0
+        for j in range(1, n+1):
+            if not used[j]:
+                cur = cost[i0-1][j-1] - u[i0] - v[j]
+                if cur < minv[j]:
+                    minv[j] = cur
+                    way[j] = j0
+                if minv[j] < delta:
+                    delta = minv[j]
+                    j1 = j
+        for j in range(0, n+1):
+            if used[j]:
+                u[p[j]] += delta
+                v[j] -= delta
+            else:
+                minv[j] -= delta
+        j0 = j1
+        if p[j0] == 0:
+            break
+    while True:
+        j1 = way[j0]
+        p[j0] = p[j1]
+        j0 = j1
+        if j0 == 0:
+            break
+
+# p[j] = assigned window index (1..n) for cell j
+# Output: cell_idx  window_id
+cell_to_win = [None]*n
+for j in range(1, n+1):
+    win_i = p[j] - 1
+    cell_j = j - 1
+    cell_to_win[cell_j] = win_i
+
+# cells list is in the same order as cell indices (idx 0..n-1), by construction
+for cell_j, win_i in enumerate(cell_to_win):
+    idx = cells[cell_j][0]
+    wid = wins[win_i][0]
+    print(f"{idx}\t{wid}")
+PY
+
+declare -A CELL_WID
+while IFS=$'\t' read -r cidx wid; do
+  CELL_WID["$cidx"]="$wid"
+done < "$map_tsv"
+
+# ----- apply geometry (client geometry; borderless windows) -----------------
+
+while IFS=$'\t' read -r cidx x y w h _cx _cy; do
+  wid="${CELL_WID[$cidx]}"
+
+  wmctrl -i -r "$wid" -b remove,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
+  xdotool windowsize "$wid" "$w" "$h"
+  xdotool windowmove "$wid" "$x" "$y"
+done < "$cell_tsv"
