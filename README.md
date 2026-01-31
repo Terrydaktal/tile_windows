@@ -36,7 +36,7 @@ sudo apt-get install wmctrl xdotool x11-utils python3
 ```
 
 - **rows**: (Optional) The number of rows in the tiling grid. Defaults to `1`.
-- **wm_class_substring**: (Optional) A case-insensitive substring to match against window `WM_CLASS`. Defaults to `xfce4-terminal`.
+- **wm_class_substring**: (Optional) A case-insensitive substring to match against window `WM_CLASS`. Defaults to `xfce4-terminal`. Note that providing a value here **replaces** the default (it does not add to it).
 
 ### Examples
 
