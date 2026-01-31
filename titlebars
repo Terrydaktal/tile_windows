@@ -1,0 +1,402 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_NAME="titlebars"
+
+# KWin rules file
+RULES="$HOME/.config/kwinrulesrc"
+
+# Prefix used in Description= for rules managed by this script
+PREFIX="__TITLEBARS_BORDERLESS_APP__"
+
+# If your KWin shortcut has a different name, override:
+#   export KWIN_NOBORDER_SHORTCUT_NAME="Window No Border"
+KWIN_NOBORDER_SHORTCUT_NAME="${KWIN_NOBORDER_SHORTCUT_NAME:-Window No Border}"
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 2; }; }
+need python3
+
+QDBUS="$(command -v qdbus6 || command -v qdbus || true)"
+
+usage() {
+  cat <<USAGE
+${SCRIPT_NAME} — manage KWin "borderless (no titlebar/frame)" rules per application.
+
+What it does:
+  - Adds/removes KWin Window Rules in: ~/.config/kwinrulesrc
+  - Matches apps by WM_CLASS (the reliable identifier KWin uses)
+  - "add" creates a rule that forces: No titlebar and frame = Yes (Force)
+  - "remove" deletes the rule AND restores titlebars immediately on currently open matching windows
+
+Usage:
+  ${SCRIPT_NAME} add --active
+      Add borderless rule for the currently focused window (reads its WM_CLASS).
+
+  ${SCRIPT_NAME} add --match <pattern>
+      Add borderless rule for the first visible window whose WM_CLASS contains <pattern>.
+
+  ${SCRIPT_NAME} add --wmclass "<resName> <resClass>"
+      Add borderless rule for an explicit WM_CLASS pair.
+
+  ${SCRIPT_NAME} remove <pattern>
+      Remove managed rules whose Description contains <pattern>,
+      then restore titlebars on currently-open matching windows immediately.
+
+  ${SCRIPT_NAME} list
+      List rules managed by this script.
+
+  ${SCRIPT_NAME} reconfigure
+      Ask KWin to reload configuration/rules.
+
+  ${SCRIPT_NAME} restart
+      Restart KWin (kwin_x11/kwin_wayland --replace).
+
+Notes:
+  - KWin applies rule changes most reliably to NEW windows. This script's "remove"
+    also toggles existing windows back immediately when possible.
+  - If your KWin shortcut name differs from "Window No Border", set:
+      export KWIN_NOBORDER_SHORTCUT_NAME="..."
+USAGE
+}
+
+reconfigure() {
+  [ -n "$QDBUS" ] && "$QDBUS" org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+}
+
+restart_kwin() {
+  if [ "${XDG_SESSION_TYPE:-x11}" = "wayland" ]; then
+    kwin_wayland --replace >/dev/null 2>&1 & disown || true
+  else
+    kwin_x11 --replace >/dev/null 2>&1 & disown || true
+  fi
+}
+
+get_wmclass_from_wid() {
+  local wid="$1"
+  need xprop
+  # output: "resName resClass"
+  xprop -id "$wid" WM_CLASS 2>/dev/null \
+    | sed -n 's/.*= "\(.*\)", "\(.*\)".*/\1 \2/p' \
+    | head -n1
+}
+
+get_active_wid() {
+  need xdotool
+  xdotool getactivewindow 2>/dev/null || true
+}
+
+find_wid_by_match() {
+  local pat_lc="${1,,}"
+  need xdotool
+  need xprop
+
+  while read -r wid; do
+    [ -z "${wid:-}" ] && continue
+    local cls
+    cls="$(xprop -id "$wid" WM_CLASS 2>/dev/null | sed -n 's/.*= //p' || true)"
+    [ -z "${cls:-}" ] && continue
+    if [[ "${cls,,}" == *"$pat_lc"* ]]; then
+      echo "$wid"
+      return 0
+    fi
+  done < <(xdotool search --onlyvisible --name '.*' 2>/dev/null || true)
+
+  return 1
+}
+
+py_edit_rules_add() {
+  local resName="$1" resClass="$2"
+
+  mkdir -p "$(dirname "$RULES")"
+  [ -f "$RULES" ] && cp -a "$RULES" "$RULES.bak.$(date +%s)" || true
+
+  python3 - "$RULES" "$PREFIX" "$resName" "$resClass" <<'PY'
+import re, sys, pathlib
+
+rules_path = pathlib.Path(sys.argv[1])
+prefix     = sys.argv[2]
+res_name   = sys.argv[3]
+res_class  = sys.argv[4]
+desc       = f"{prefix}:{res_name}:{res_class}"
+
+text = rules_path.read_text(errors="ignore") if rules_path.exists() else ""
+
+parts = re.split(r'(?m)^(?=\[\d+\]\s*$|\[General\]\s*$)', text)
+sections = []
+for p in parts:
+    if not p.strip():
+        continue
+    head = re.match(r'^\[([^\]]+)\]\s*$', p.strip().splitlines()[0].strip())
+    if head:
+        sections.append((head.group(1), p))
+
+if not any(name == "General" for name,_ in sections):
+    sections.insert(0, ("General", "[General]\ncount=0\n\n"))
+
+def get_desc(block: str):
+    m = re.search(r'(?m)^Description=(.*)$', block)
+    return m.group(1).strip() if m else None
+
+new_sections = []
+for name, block in sections:
+    if name == "General":
+        new_sections.append((name, block))
+        continue
+    if get_desc(block) == desc:
+        continue
+    new_sections.append((name, block))
+
+nums = [int(n) for n,_ in new_sections if n.isdigit()]
+new_idx = str(max(nums)+1) if nums else "1"
+
+rule = f"""[{new_idx}]
+Description={desc}
+
+# Match by WM_CLASS
+wmclass={res_name} {res_class}
+wmclassmatch=1
+wmclasscomplete=true
+
+# Only normal windows
+types=1
+typesrule=2
+
+# Force borderless
+noborder=true
+noborderrule=2
+
+"""
+
+new_sections.append((new_idx, rule))
+count = sum(1 for n,_ in new_sections if n.isdigit())
+
+out = []
+for name, block in new_sections:
+    if name == "General":
+        if re.search(r'(?m)^count=', block):
+            block = re.sub(r'(?m)^count=.*$', f"count={count}", block)
+        else:
+            block = block.rstrip() + f"\ncount={count}\n"
+        out.append(block.rstrip() + "\n\n")
+    else:
+        out.append(block.rstrip() + "\n\n")
+
+rules_path.write_text("".join(out))
+print(f"Added rule {desc}")
+PY
+}
+
+py_edit_rules_remove() {
+  local pattern="${1,,}"
+
+  [ -f "$RULES" ] || { echo "No rules file at $RULES" >&2; exit 1; }
+  cp -a "$RULES" "$RULES.bak.$(date +%s)" || true
+
+  python3 - "$RULES" "$PREFIX" "$pattern" <<'PY'
+import re, sys, pathlib
+
+rules_path = pathlib.Path(sys.argv[1])
+prefix     = sys.argv[2]
+pat        = sys.argv[3]
+
+text = rules_path.read_text(errors="ignore") if rules_path.exists() else ""
+if not text.strip():
+    print("Empty rules file.")
+    sys.exit(0)
+
+blocks = re.split(r'(?m)^(?=\[General\]|\[\d+\]\s*$)', text)
+kept = []
+removed = 0
+
+def block_desc(b: str):
+    m = re.search(r'(?m)^Description=(.*)$', b)
+    return m.group(1).strip() if m else ""
+
+for b in blocks:
+    if not b.strip():
+        continue
+    header = b.strip().splitlines()[0].strip()
+    if header == "[General]":
+        kept.append(b)
+        continue
+
+    d = block_desc(b)
+    if d.startswith(prefix) and pat in d.lower():
+        removed += 1
+        continue
+    kept.append(b)
+
+numeric = sum(1 for b in kept if re.match(r'(?m)^\[\d+\]\s*$', b.strip().splitlines()[0].strip()))
+new_kept = []
+for b in kept:
+    if b.strip().splitlines()[0].strip() == "[General]":
+        if re.search(r'(?m)^count=', b):
+            b = re.sub(r'(?m)^count=.*$', f"count={numeric}", b)
+        else:
+            b = b.rstrip() + f"\ncount={numeric}\n"
+    new_kept.append(b.rstrip() + "\n\n")
+
+rules_path.write_text("".join(new_kept))
+print(f"Removed {removed} rule(s) matching '{pat}'.")
+PY
+}
+
+list_rules() {
+  [ -f "$RULES" ] || { echo "No rules file at $RULES"; exit 0; }
+  python3 - "$RULES" "$PREFIX" <<'PY'
+import re, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+prefix = sys.argv[2]
+t = p.read_text(errors="ignore")
+for m in re.finditer(r'(?m)^\[\d+\]\s*$.*?(?=^\[\d+\]|\Z)', t, flags=re.S):
+    block = m.group(0)
+    dm = re.search(r'(?m)^Description=(.*)$', block)
+    if not dm:
+        continue
+    d = dm.group(1).strip()
+    if d.startswith(prefix):
+        wm = re.search(r'(?m)^wmclass=(.*)$', block)
+        print(f"- {d}  (wmclass={wm.group(1).strip() if wm else '??'})")
+PY
+}
+
+# --- titlebar restore on remove --------------------------------------------
+
+invoke_kwin_shortcut() {
+  [ -n "$QDBUS" ] || return 1
+
+  "$QDBUS" org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component.invokeShortcut "$KWIN_NOBORDER_SHORTCUT_NAME" >/dev/null 2>&1 \
+  && return 0
+
+  "$QDBUS" org.kde.kglobalaccel /component/kwin invokeShortcut "$KWIN_NOBORDER_SHORTCUT_NAME" >/dev/null 2>&1 \
+  && return 0
+
+  return 1
+}
+
+xwin_wh() {
+  # usage: xwin_wh <wid> [--frame]
+  local wid="$1"
+  local frame="${2:-}"
+  if [ "$frame" = "--frame" ]; then
+    xwininfo -frame -id "$wid" 2>/dev/null | awk '/^  Width:/{w=$2}/^  Height:/{h=$2}END{print w+0, h+0}'
+  else
+    xwininfo -id "$wid" 2>/dev/null | awk '/^  Width:/{w=$2}/^  Height:/{h=$2}END{print w+0, h+0}'
+  fi
+}
+
+is_borderless_now() {
+  # If frame WxH == client WxH, there are no decorations.
+  local wid="$1"
+  local cw ch fw fh
+  read -r cw ch < <(xwin_wh "$wid" || echo "0 0")
+  read -r fw fh < <(xwin_wh "$wid" --frame || echo "0 0")
+  [ "$cw" -gt 0 ] && [ "$fw" -gt 0 ] && [ "$cw" -eq "$fw" ] && [ "$ch" -eq "$fh" ]
+}
+
+restore_titlebars_for_pattern() {
+  local pat_lc="${1,,}"
+
+  command -v xdotool >/dev/null 2>&1 || return 0
+  command -v xprop   >/dev/null 2>&1 || return 0
+  command -v xwininfo >/dev/null 2>&1 || return 0
+  [ -n "$QDBUS" ] || return 0
+
+  local active
+  active="$(xdotool getactivewindow 2>/dev/null || true)"
+
+  mapfile -t wids < <(
+    xdotool search --onlyvisible --name '.*' 2>/dev/null | while read -r wid; do
+      cls="$(xprop -id "$wid" WM_CLASS 2>/dev/null | sed -n 's/.*= //p' || true)"
+      [ -z "${cls:-}" ] && continue
+      [[ "${cls,,}" == *"$pat_lc"* ]] && echo "$wid"
+    done
+  )
+
+  for wid in "${wids[@]}"; do
+    if is_borderless_now "$wid"; then
+      xdotool windowactivate "$wid" >/dev/null 2>&1 || true
+      invoke_kwin_shortcut || true
+    fi
+  done
+
+  [ -n "${active:-}" ] && xdotool windowactivate "$active" >/dev/null 2>&1 || true
+}
+
+# --- command dispatcher -----------------------------------------------------
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  add)
+    mode="${1:-}"; shift || true
+    case "$mode" in
+      --active)
+        need xdotool
+        need xprop
+        wid="$(get_active_wid)"
+        [ -n "${wid:-}" ] || { echo "No active window id (xdotool failed)." >&2; exit 1; }
+        wm="$(get_wmclass_from_wid "$wid")"
+        [ -n "${wm:-}" ] || { echo "Could not read WM_CLASS from active window." >&2; exit 1; }
+        resName="${wm%% *}"
+        resClass="${wm#* }"
+        py_edit_rules_add "$resName" "$resClass"
+        reconfigure
+        echo "Added borderless rule for active WM_CLASS: $resName $resClass"
+        ;;
+      --match)
+        pat="${1:-}"; shift || true
+        [ -n "${pat:-}" ] || { echo "Need a pattern: ${SCRIPT_NAME} add --match <pattern>" >&2; exit 2; }
+        wid="$(find_wid_by_match "$pat" || true)"
+        [ -n "${wid:-}" ] || { echo "No visible window matched '$pat'. Focus a window and use: ${SCRIPT_NAME} add --active" >&2; exit 1; }
+        wm="$(get_wmclass_from_wid "$wid")"
+        [ -n "${wm:-}" ] || { echo "Could not read WM_CLASS for matched window." >&2; exit 1; }
+        resName="${wm%% *}"
+        resClass="${wm#* }"
+        py_edit_rules_add "$resName" "$resClass"
+        reconfigure
+        echo "Added borderless rule for WM_CLASS: $resName $resClass"
+        ;;
+      --wmclass)
+        wm="${1:-}"; shift || true
+        [ -n "${wm:-}" ] || { echo "Need: ${SCRIPT_NAME} add --wmclass \"name Class\"" >&2; exit 2; }
+        resName="${wm%% *}"
+        resClass="${wm#* }"
+        py_edit_rules_add "$resName" "$resClass"
+        reconfigure
+        echo "Added borderless rule for WM_CLASS: $resName $resClass"
+        ;;
+      *)
+        echo "Unknown add mode." >&2
+        usage
+        exit 2
+        ;;
+    esac
+    ;;
+  remove)
+    pat="${1:-}"
+    [ -n "${pat:-}" ] || { echo "Need a pattern: ${SCRIPT_NAME} remove <pattern>" >&2; exit 2; }
+    py_edit_rules_remove "$pat"
+    reconfigure
+    restore_titlebars_for_pattern "$pat"
+    ;;
+  list)
+    list_rules
+    ;;
+  reconfigure)
+    reconfigure
+    ;;
+  restart)
+    restart_kwin
+    ;;
+  ""|-h|--help|help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage
+    exit 2
+    ;;
+esac
+
