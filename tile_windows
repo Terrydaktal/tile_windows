@@ -2,11 +2,15 @@
 set -euo pipefail
 
 ROWS="${1:-1}"
-MATCH="${2:-xfce4-terminal}"   # WM_CLASS substring (case-insensitive)
+# WM_CLASS substring(s) (case-insensitive).
+# If omitted, defaults to "xfce4-terminal".
+# If explicitly set to empty string, match all visible windows.
+MATCH="${2-xfce4-terminal}"
 GAP=3                        # fixed gap between all windows (px)
 
 if ! [[ "$ROWS" =~ ^[0-9]+$ ]] || [ "$ROWS" -lt 1 ]; then
-  echo "Usage: tile_windows [rows>=1] [wm_class_substring]" >&2
+  echo "Usage: tile_windows [rows>=1] [wm_class_substrings]" >&2
+  echo "  wm_class_substrings: comma-separated (e.g. firefox,xfce4-terminal). Empty string means: all visible windows." >&2
   exit 2
 fi
 
@@ -87,7 +91,22 @@ DESK="${DESK:-0}"
 
 # ----- collect windows -----------------------------------------------------
 
+trim() {
+  local s="$1"
+  # Trim leading/trailing whitespace.
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
 MATCH_LC="${MATCH,,}"
+MATCH_ALL=0
+MATCHES=()
+if [ -z "${MATCH_LC}" ]; then
+  MATCH_ALL=1
+else
+  IFS=',' read -r -a MATCHES <<<"$MATCH_LC"
+fi
 WIDS=()
 
 while read -r wid; do
@@ -98,12 +117,28 @@ while read -r wid; do
   cls="$(xprop -id "$wid" WM_CLASS 2>/dev/null | sed -n 's/.*= //p' || true)"
   [[ -z "${cls:-}" ]] && continue
 
-  [[ "${cls,,}" == *"$MATCH_LC"* ]] && WIDS+=("$wid")
+  if (( MATCH_ALL )); then
+    WIDS+=("$wid")
+  else
+    cls_lc="${cls,,}"
+    for pat in "${MATCHES[@]}"; do
+      pat="$(trim "$pat")"
+      [ -z "${pat}" ] && continue
+      if [[ "$cls_lc" == *"$pat"* ]]; then
+        WIDS+=("$wid")
+        break
+      fi
+    done
+  fi
 done < <(xdotool search --onlyvisible --name '.*' 2>/dev/null || true)
 
 COUNT="${#WIDS[@]}"
 if (( COUNT == 0 )); then
-  echo "No visible windows matched WM_CLASS containing: $MATCH" >&2
+  if (( MATCH_ALL )); then
+    echo "No visible windows found on this desktop." >&2
+  else
+    echo "No visible windows matched WM_CLASS containing: $MATCH" >&2
+  fi
   echo "Check with: xprop -id \$(xdotool getactivewindow) WM_CLASS" >&2
   exit 1
 fi
