@@ -114,6 +114,13 @@ while read -r wid; do
   wdesk="${wdesk:-$DESK}"
   [[ "$wdesk" != "$DESK" && "$wdesk" != "-1" ]] && continue
 
+  # Never tile desktop/panel/dock windows (Plasma desktop, panels, docks, etc.).
+  # These are "visible" but resizing/moving them can corrupt the compositor output.
+  wtype="$(xprop -id "$wid" _NET_WM_WINDOW_TYPE 2>/dev/null || true)"
+  if [[ "$wtype" == *"_NET_WM_WINDOW_TYPE_DESKTOP"* || "$wtype" == *"_NET_WM_WINDOW_TYPE_DOCK"* ]]; then
+    continue
+  fi
+
   cls="$(xprop -id "$wid" WM_CLASS 2>/dev/null | sed -n 's/.*= //p' || true)"
   [[ -z "${cls:-}" ]] && continue
 

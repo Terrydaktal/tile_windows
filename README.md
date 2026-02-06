@@ -60,6 +60,7 @@ Once decorations are removed, run the tiling script:
 - **rows**: (Optional) The number of rows in the tiling grid. Defaults to `1`.
 - **wm_class_substrings**: (Optional) A comma-separated list of case-insensitive substrings to match against window `WM_CLASS` (logical OR). Defaults to `xfce4-terminal` when omitted.
   - Pass an explicit empty string (`""`) to match **all** visible windows.
+  - Desktop/panel/dock windows (e.g. Plasma desktop/panels) are always excluded.
 
 ### Examples
 
