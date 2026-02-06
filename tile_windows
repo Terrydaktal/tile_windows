@@ -133,7 +133,7 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 win_tsv="$tmpdir/windows.tsv"
-cell_tsv="$tmpdir/cells.tsv"
+map_tsv="$tmpdir/map.tsv"
 
 : > "$win_tsv"
 for wid in "${WIDS[@]}"; do
@@ -143,46 +143,13 @@ for wid in "${WIDS[@]}"; do
   printf "%s\t%d\t%d\n" "$wid" "$cx" "$cy" >> "$win_tsv"
 done
 
-USABLE_H=$(( WORK_H - (ROWS - 1) * GAP ))
-(( USABLE_H < 1 )) && { echo "Gap too large for height." >&2; exit 2; }
+# ----- assign windows to nearest row, then tile within that row -------------
 
-H_BASE=$(( USABLE_H / ROWS ))
-H_REM=$(( USABLE_H % ROWS ))
-
-idx=0
-: > "$cell_tsv"
-for ((r=0; r<ROWS; r++)); do
-  remaining=$(( COUNT - idx ))
-  rows_left=$(( ROWS - r ))
-  cols=$(( (remaining + rows_left - 1) / rows_left ))
-
-  USABLE_W=$(( WORK_W - (cols - 1) * GAP ))
-  (( USABLE_W < 1 )) && { echo "Gap too large for width." >&2; exit 2; }
-
-  W_BASE=$(( USABLE_W / cols ))
-  W_REM=$(( USABLE_W % cols ))
-
-  cell_h=$(( H_BASE + (r < H_REM ? 1 : 0) ))
-  y=$(( WORK_Y + r * (H_BASE + GAP) + (r < H_REM ? r : H_REM) ))
-
-  for ((c=0; c<cols && idx<COUNT; c++)); do
-    cell_w=$(( W_BASE + (c < W_REM ? 1 : 0) ))
-    x=$(( WORK_X + c * (W_BASE + GAP) + (c < W_REM ? c : W_REM) ))
-    cx=$(( x + cell_w / 2 ))
-    cy=$(( y + cell_h / 2 ))
-    printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\n" "$idx" "$x" "$y" "$cell_w" "$cell_h" "$cx" "$cy" >> "$cell_tsv"
-    idx=$((idx + 1))
-  done
-done
-
-# ----- assign windows to nearest cells (global minimum movement) ------------
-
-map_tsv="$tmpdir/map.tsv"
-
-python3 - "$win_tsv" "$cell_tsv" > "$map_tsv" <<'PY'
+python3 - "$win_tsv" "$WORK_X" "$WORK_Y" "$WORK_W" "$WORK_H" "$ROWS" "$GAP" > "$map_tsv" <<'PY'
 import sys
 
-win_file, cell_file = sys.argv[1], sys.argv[2]
+win_file = sys.argv[1]
+work_x, work_y, work_w, work_h, rows, gap = map(int, sys.argv[2:])
 
 wins = []
 with open(win_file, "r", encoding="utf-8") as f:
@@ -190,92 +157,64 @@ with open(win_file, "r", encoding="utf-8") as f:
         wid, cx, cy = line.rstrip("\n").split("\t")
         wins.append((wid, int(cx), int(cy)))
 
-cells = []
-with open(cell_file, "r", encoding="utf-8") as f:
-    for line in f:
-        idx, x, y, w, h, cx, cy = line.rstrip("\n").split("\t")
-        cells.append((int(idx), int(cx), int(cy)))
+if not wins:
+    raise SystemExit(0)
 
-n = len(wins)
-if n != len(cells):
-    raise SystemExit("windows != cells")
+if rows > len(wins):
+    rows = len(wins)
 
-# cost[i][j] = squared distance from window i to cell j
-cost = [[0]*n for _ in range(n)]
-for i, (_, wx, wy) in enumerate(wins):
-    for j, (_, cx, cy) in enumerate(cells):
-        dx = wx - cx
-        dy = wy - cy
-        cost[i][j] = dx*dx + dy*dy
+usable_h = work_h - (rows - 1) * gap
+if usable_h < 1:
+    raise SystemExit("Gap too large for height.")
 
-# Hungarian algorithm (min-cost assignment), 1-indexed implementation
-INF = 10**30
-u = [0]*(n+1)
-v = [0]*(n+1)
-p = [0]*(n+1)
-way = [0]*(n+1)
+h_base = usable_h // rows
+h_rem = usable_h % rows
 
-for i in range(1, n+1):
-    p[0] = i
-    j0 = 0
-    minv = [INF]*(n+1)
-    used = [False]*(n+1)
-    while True:
-        used[j0] = True
-        i0 = p[j0]
-        delta = INF
-        j1 = 0
-        for j in range(1, n+1):
-            if not used[j]:
-                cur = cost[i0-1][j-1] - u[i0] - v[j]
-                if cur < minv[j]:
-                    minv[j] = cur
-                    way[j] = j0
-                if minv[j] < delta:
-                    delta = minv[j]
-                    j1 = j
-        for j in range(0, n+1):
-            if used[j]:
-                u[p[j]] += delta
-                v[j] -= delta
-            else:
-                minv[j] -= delta
-        j0 = j1
-        if p[j0] == 0:
-            break
-    while True:
-        j1 = way[j0]
-        p[j0] = p[j1]
-        j0 = j1
-        if j0 == 0:
-            break
+row_y = []
+row_h = []
+row_cy = []
+for r in range(rows):
+    h = h_base + (1 if r < h_rem else 0)
+    y = work_y + r * (h_base + gap) + (r if r < h_rem else h_rem)
+    row_y.append(y)
+    row_h.append(h)
+    row_cy.append(y + h // 2)
 
-# p[j] = assigned window index (1..n) for cell j
-# Output: cell_idx  window_id
-cell_to_win = [None]*n
-for j in range(1, n+1):
-    win_i = p[j] - 1
-    cell_j = j - 1
-    cell_to_win[cell_j] = win_i
+rows_wins = [[] for _ in range(rows)]
+for wid, cx, cy in wins:
+    best_r = 0
+    best_d = abs(cy - row_cy[0])
+    for r in range(1, rows):
+        d = abs(cy - row_cy[r])
+        if d < best_d:
+            best_d = d
+            best_r = r
+    rows_wins[best_r].append((wid, cx, cy))
 
-# cells list is in the same order as cell indices (idx 0..n-1), by construction
-for cell_j, win_i in enumerate(cell_to_win):
-    idx = cells[cell_j][0]
-    wid = wins[win_i][0]
-    print(f"{idx}\t{wid}")
+for r in range(rows):
+    row_list = rows_wins[r]
+    if not row_list:
+        continue
+    row_list.sort(key=lambda t: t[1])  # left-to-right
+    cols = len(row_list)
+    usable_w = work_w - (cols - 1) * gap
+    if usable_w < 1:
+        raise SystemExit("Gap too large for width.")
+    w_base = usable_w // cols
+    w_rem = usable_w % cols
+
+    for c, (wid, _cx, _cy) in enumerate(row_list):
+        w = w_base + (1 if c < w_rem else 0)
+        x = work_x + c * (w_base + gap) + (c if c < w_rem else w_rem)
+        y = row_y[r]
+        h = row_h[r]
+        print(f"{wid}\t{x}\t{y}\t{w}\t{h}")
 PY
-
-declare -A CELL_WID
-while IFS=$'\t' read -r cidx wid; do
-  CELL_WID["$cidx"]="$wid"
-done < "$map_tsv"
 
 # ----- apply geometry (client geometry; borderless windows) -----------------
 
-while IFS=$'\t' read -r cidx x y w h _cx _cy; do
-  wid="${CELL_WID[$cidx]}"
-
+while IFS=$'\t' read -r wid x y w h; do
   wmctrl -i -r "$wid" -b remove,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
   xdotool windowsize "$wid" "$w" "$h"
   xdotool windowmove "$wid" "$x" "$y"
-done < "$cell_tsv"
+done < "$map_tsv"
