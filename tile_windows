@@ -6,7 +6,7 @@ ROWS="${1:-1}"
 # If omitted, defaults to "xfce4-terminal".
 # If explicitly set to empty string, match all visible windows.
 MATCH="${2-xfce4-terminal}"
-GAP=3                        # fixed gap between all windows (px)
+GAP=1                        # fixed gap between all windows (px)
 
 if ! [[ "$ROWS" =~ ^[0-9]+$ ]] || [ "$ROWS" -lt 1 ]; then
   echo "Usage: tile_windows [rows>=1] [wm_class_substrings]" >&2
