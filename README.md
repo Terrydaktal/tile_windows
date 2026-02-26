@@ -89,7 +89,7 @@ Tile all visible windows on the current desktop:
 1. **Discovery**: Finds all visible windows on the current desktop matching the provided `WM_CLASS` substring(s).
 2. **Row Calculation**: Splits the workarea into `rows` horizontal bands.
 3. **Assignment**: Assigns each window to the closest row by vertical position, then orders windows left-to-right within each row.
-4. **Execution**: Resizes and moves each window to its row tile.
+4. **Execution**: Removes window size hints (`WM_NORMAL_HINTS`) to prevent terminal emulators from snapping to character-grid increments, ensuring perfect 1px gaps between windows. (Note: This forces exact pixel dimensions, which may result in a slightly larger internal padding margin inside terminal windows instead of cutting off text). Finally, it resizes and moves each window to its row tile.
 
 ## License
 
