@@ -257,6 +257,10 @@ PY
 
 while IFS=$'\t' read -r wid x y w h; do
   wmctrl -i -r "$wid" -b remove,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
+  
+  # Remove size hints so terminal windows can resize to exact pixels rather than character increments
+  xprop -id "$wid" -remove WM_NORMAL_HINTS 2>/dev/null || true
+  
   xdotool windowsize "$wid" "$w" "$h"
   xdotool windowmove "$wid" "$x" "$y"
 done < "$map_tsv"
