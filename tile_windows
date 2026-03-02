@@ -42,6 +42,22 @@ win_geom() {
   '
 }
 
+# left right top bottom frame extents for a window (0 0 0 0 when unavailable)
+win_extents() {
+  local line l r t b
+  line="$(xprop -id "$1" _NET_FRAME_EXTENTS 2>/dev/null | sed -n 's/.*= //p' || true)"
+  if [[ "$line" =~ ^[[:space:]]*[0-9]+,[[:space:]]*[0-9]+,[[:space:]]*[0-9]+,[[:space:]]*[0-9]+[[:space:]]*$ ]]; then
+    IFS=',' read -r l r t b <<<"$line"
+    l="${l//[[:space:]]/}"
+    r="${r//[[:space:]]/}"
+    t="${t//[[:space:]]/}"
+    b="${b//[[:space:]]/}"
+    echo "$l $r $t $b"
+  else
+    echo "0 0 0 0"
+  fi
+}
+
 # Workarea from wmctrl -d: WA: x,y WxH
 get_workarea_from_wmctrl() {
   local desk="$1"
@@ -261,6 +277,14 @@ while IFS=$'\t' read -r wid x y w h; do
   # Remove size hints so terminal windows can resize to exact pixels rather than character increments
   xprop -id "$wid" -remove WM_NORMAL_HINTS 2>/dev/null || true
   
-  xdotool windowsize "$wid" "$w" "$h"
+  # Compensate for per-window frame extents so the intended gap is preserved
+  # between outer window rectangles even when decorations/shadows are present.
+  read -r ext_l ext_r ext_t ext_b < <(win_extents "$wid")
+  cw=$(( w - ext_l - ext_r ))
+  ch=$(( h - ext_t - ext_b ))
+  (( cw < 1 )) && cw=1
+  (( ch < 1 )) && ch=1
+
+  xdotool windowsize "$wid" "$cw" "$ch"
   xdotool windowmove "$wid" "$x" "$y"
 done < "$map_tsv"
