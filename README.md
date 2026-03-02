@@ -5,7 +5,7 @@
 ## Features
 
 - **Smart Tiling**: Automatically arranges windows into a grid based on the specified number of rows.
-- **Row-Preserving Tiling**: Assigns each window to the closest row based on its current position, then tiles within that row left-to-right.
+- **Fixed Grid Tiling**: Uses a strict matrix layout based on the requested row count (with columns derived from window count), avoiding uneven per-row spacing.
 - **Titlebar Management**: Includes a helper script `titlebars` to force windows into a borderless state via KWin rules, ensuring perfect alignment.
 - **WM_CLASS Matching**: Target specific applications by matching their `WM_CLASS` string (e.g., `xfce4-terminal`, `code`, `google-chrome`).
 - **Workarea Awareness**: Automatically detects the usable screen area, accounting for panels and bars (with specific support for `xfce4-panel`).
@@ -87,9 +87,9 @@ Tile all visible windows on the current desktop:
 ## How it Works
 
 1. **Discovery**: Finds all visible windows on the current desktop matching the provided `WM_CLASS` substring(s).
-2. **Row Calculation**: Splits the workarea into `rows` horizontal bands.
-3. **Assignment**: Assigns each window to the closest row by vertical position, then orders windows left-to-right within each row.
-4. **Execution**: Removes window size hints (`WM_NORMAL_HINTS`) to prevent terminal emulators from snapping to character-grid increments, ensuring perfect 1px gaps between windows. (Note: This forces exact pixel dimensions, which may result in a slightly larger internal padding margin inside terminal windows instead of cutting off text). Finally, it resizes and moves each window to its row tile.
+2. **Grid Calculation**: Splits the workarea into `rows` and a fixed number of columns (`ceil(window_count / rows)`).
+3. **Assignment**: Orders windows top-to-bottom then left-to-right by current center position, then fills the grid row-major.
+4. **Execution**: Removes window size hints (`WM_NORMAL_HINTS`) to prevent terminal emulators from snapping to character-grid increments, ensuring consistent pixel gaps between windows. (Note: This forces exact pixel dimensions, which may result in a slightly larger internal padding margin inside terminal windows instead of cutting off text). Finally, it resizes and moves each window to its grid cell.
 
 ## License
 
