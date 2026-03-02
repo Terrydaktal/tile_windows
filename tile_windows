@@ -185,7 +185,7 @@ for wid in "${WIDS[@]}"; do
   printf "%s\t%d\t%d\n" "$wid" "$cx" "$cy" >> "$win_tsv"
 done
 
-# ----- assign windows into a fixed grid (row-major) -------------------------
+# ----- assign windows to nearest row, then tile within that row -------------
 
 python3 - "$win_tsv" "$WORK_X" "$WORK_Y" "$WORK_W" "$WORK_H" "$ROWS" "$GAP" > "$map_tsv" <<'PY'
 import sys
@@ -205,9 +205,6 @@ if not wins:
 if rows > len(wins):
     rows = len(wins)
 
-# Fixed column count for all rows; strict matrix behavior.
-cols = (len(wins) + rows - 1) // rows
-
 usable_h = work_h - (rows - 1) * gap
 if usable_h < 1:
     raise SystemExit("Gap too large for height.")
@@ -215,40 +212,45 @@ if usable_h < 1:
 h_base = usable_h // rows
 h_rem = usable_h % rows
 
-usable_w = work_w - (cols - 1) * gap
-if usable_w < 1:
-    raise SystemExit("Gap too large for width.")
-w_base = usable_w // cols
-w_rem = usable_w % cols
-
 row_y = []
 row_h = []
+row_cy = []
 for r in range(rows):
     h = h_base + (1 if r < h_rem else 0)
     y = work_y + r * (h_base + gap) + (r if r < h_rem else h_rem)
     row_y.append(y)
     row_h.append(h)
+    row_cy.append(y + h // 2)
 
-col_x = []
-col_w = []
-for c in range(cols):
-    w = w_base + (1 if c < w_rem else 0)
-    x = work_x + c * (w_base + gap) + (c if c < w_rem else w_rem)
-    col_x.append(x)
-    col_w.append(w)
+rows_wins = [[] for _ in range(rows)]
+for wid, cx, cy in wins:
+    best_r = 0
+    best_d = abs(cy - row_cy[0])
+    for r in range(1, rows):
+        d = abs(cy - row_cy[r])
+        if d < best_d:
+            best_d = d
+            best_r = r
+    rows_wins[best_r].append((wid, cx, cy))
 
-# Deterministic row-major fill based on current center positions.
-wins.sort(key=lambda t: (t[2], t[1], t[0]))  # top-to-bottom, then left-to-right
-for i, (wid, _cx, _cy) in enumerate(wins):
-    r = i // cols
-    c = i % cols
-    if r >= rows:
-        r = rows - 1
-    x = col_x[c]
-    y = row_y[r]
-    w = col_w[c]
-    h = row_h[r]
-    print(f"{wid}\t{x}\t{y}\t{w}\t{h}")
+for r in range(rows):
+    row_list = rows_wins[r]
+    if not row_list:
+        continue
+    row_list.sort(key=lambda t: t[1])  # left-to-right
+    cols = len(row_list)
+    usable_w = work_w - (cols - 1) * gap
+    if usable_w < 1:
+        raise SystemExit("Gap too large for width.")
+    w_base = usable_w // cols
+    w_rem = usable_w % cols
+
+    for c, (wid, _cx, _cy) in enumerate(row_list):
+        w = w_base + (1 if c < w_rem else 0)
+        x = work_x + c * (w_base + gap) + (c if c < w_rem else w_rem)
+        y = row_y[r]
+        h = row_h[r]
+        print(f"{wid}\t{x}\t{y}\t{w}\t{h}")
 PY
 
 # ----- apply geometry (client geometry; borderless windows) -----------------
