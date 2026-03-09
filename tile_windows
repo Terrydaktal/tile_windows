@@ -7,6 +7,7 @@ ROWS="${1:-1}"
 # If explicitly set to empty string, match all visible windows.
 MATCH="${2-xfce4-terminal}"
 GAP=1                        # fixed gap between all windows (px)
+TILE_STABILIZE_DELAY="${TILE_STABILIZE_DELAY:-0.12}"  # seconds between first and second apply pass
 
 if ! [[ "$ROWS" =~ ^[0-9]+$ ]] || [ "$ROWS" -lt 1 ]; then
   echo "Usage: tile_windows [rows>=1] [wm_class_substrings]" >&2
@@ -293,20 +294,27 @@ PY
 
 # ----- apply geometry (client geometry; borderless windows) -----------------
 
-while IFS=$'\t' read -r wid x y w h; do
-  wmctrl -i -r "$wid" -b remove,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
-  
-  # Remove size hints so terminal windows can resize to exact pixels rather than character increments
-  xprop -id "$wid" -remove WM_NORMAL_HINTS 2>/dev/null || true
-  
-  # Compensate for per-window frame extents so the intended gap is preserved
-  # between outer window rectangles even when decorations/shadows are present.
-  read -r ext_l ext_r ext_t ext_b < <(win_extents "$wid")
-  cw=$(( w - ext_l - ext_r ))
-  ch=$(( h - ext_t - ext_b ))
-  (( cw < 1 )) && cw=1
-  (( ch < 1 )) && ch=1
+apply_geometry_pass() {
+  while IFS=$'\t' read -r wid x y w h; do
+    wmctrl -i -r "$wid" -b remove,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
 
-  xdotool windowsize "$wid" "$cw" "$ch"
-  xdotool windowmove "$wid" "$x" "$y"
-done < "$map_tsv"
+    # Remove size hints so terminal windows can resize to exact pixels rather than character increments
+    xprop -id "$wid" -remove WM_NORMAL_HINTS 2>/dev/null || true
+
+    # Compensate for per-window frame extents so the intended gap is preserved
+    # between outer window rectangles even when decorations/shadows are present.
+    read -r ext_l ext_r ext_t ext_b < <(win_extents "$wid")
+    cw=$(( w - ext_l - ext_r ))
+    ch=$(( h - ext_t - ext_b ))
+    (( cw < 1 )) && cw=1
+    (( ch < 1 )) && ch=1
+
+    xdotool windowsize "$wid" "$cw" "$ch"
+    xdotool windowmove "$wid" "$x" "$y"
+  done < "$map_tsv"
+}
+
+# Two-pass apply: some terminals republish size hints shortly after a move/resize.
+apply_geometry_pass
+sleep "$TILE_STABILIZE_DELAY"
+apply_geometry_pass
