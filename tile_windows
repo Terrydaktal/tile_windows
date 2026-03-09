@@ -7,7 +7,7 @@ ROWS="${1:-1}"
 # If explicitly set to empty string, match all visible windows.
 MATCH="${2-xfce4-terminal}"
 GAP=1                        # fixed gap between all windows (px)
-TILE_STABILIZE_DELAY="${TILE_STABILIZE_DELAY:-0.12}"  # seconds between first and second apply pass
+TILE_STABILIZE_DELAY="${TILE_STABILIZE_DELAY:-0.05}"  # seconds between first and second apply pass
 
 if ! [[ "$ROWS" =~ ^[0-9]+$ ]] || [ "$ROWS" -lt 1 ]; then
   echo "Usage: tile_windows [rows>=1] [wm_class_substrings]" >&2
