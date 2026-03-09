@@ -86,7 +86,7 @@ Tile all visible windows on the current desktop:
 
 ## How it Works
 
-1. **Discovery**: Finds all visible windows on the current desktop matching the provided `WM_CLASS` substring(s).
+1. **Discovery**: Finds visible, WM-managed windows on the current desktop matching the provided `WM_CLASS` substring(s), which avoids tiling orphan override-redirect surfaces.
 2. **Row Calculation**: Splits the workarea into `rows` horizontal bands.
 3. **Assignment**: Assigns each window to the closest row by vertical position, then orders windows left-to-right within each row.
 4. **Execution**: Removes window size hints (`WM_NORMAL_HINTS`) to prevent terminal emulators from snapping to character-grid increments, then compensates each window's frame extents so configured gaps stay consistent even with decorations. Finally, it resizes and moves each window to its row tile.

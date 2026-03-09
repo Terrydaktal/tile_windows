@@ -100,6 +100,20 @@ compute_workarea_with_panel_subtract() {
   echo "$wx $wy $ww $wh"
 }
 
+managed_client_ids() {
+  xprop -root _NET_CLIENT_LIST_STACKING 2>/dev/null \
+    | sed -n 's/.*# //p' \
+    | tr ',' '\n' \
+    | awk '{$1=$1}; $1!="" {print $1}'
+}
+
+is_window_viewable() {
+  local wid="$1" state
+  state="$(xprop -id "$wid" _NET_WM_STATE 2>/dev/null || true)"
+  [[ "$state" == *"_NET_WM_STATE_HIDDEN"* ]] && return 1
+  xwininfo -id "$wid" 2>/dev/null | grep -q 'Map State: IsViewable'
+}
+
 # ----- desktop -------------------------------------------------------------
 
 DESK="$(xprop -root _NET_CURRENT_DESKTOP 2>/dev/null | awk -F'= ' '{print $2}' || true)"
@@ -125,7 +139,15 @@ else
 fi
 WIDS=()
 
+ids="$(managed_client_ids || true)"
+[ -z "${ids:-}" ] && ids="$(xdotool search --onlyvisible --name '.*' 2>/dev/null || true)"
+
 while read -r wid; do
+  [ -n "${wid:-}" ] || continue
+
+  # Skip unmapped/minimized clients. Keeps tiling to visible, managed windows.
+  is_window_viewable "$wid" || continue
+
   wdesk="$(xprop -id "$wid" _NET_WM_DESKTOP 2>/dev/null | awk -F'= ' '{print $2}' | tr -d ',' || true)"
   wdesk="${wdesk:-$DESK}"
   [[ "$wdesk" != "$DESK" && "$wdesk" != "-1" ]] && continue
@@ -153,7 +175,7 @@ while read -r wid; do
       fi
     done
   fi
-done < <(xdotool search --onlyvisible --name '.*' 2>/dev/null || true)
+done <<<"$ids"
 
 COUNT="${#WIDS[@]}"
 if (( COUNT == 0 )); then
