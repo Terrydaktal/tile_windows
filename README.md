@@ -89,7 +89,10 @@ Tile all visible windows on the current desktop:
 1. **Discovery**: Finds visible, WM-managed windows on the current desktop matching the provided `WM_CLASS` substring(s), which avoids tiling orphan override-redirect surfaces.
 2. **Row Calculation**: Splits the workarea into `rows` horizontal bands.
 3. **Assignment**: Assigns each window to the closest row by vertical position, then orders windows left-to-right within each row.
-4. **Execution**: Removes window size hints (`WM_NORMAL_HINTS`) to prevent terminal emulators from snapping to character-grid increments, then compensates each window's frame extents so configured gaps stay consistent even with decorations. It applies geometry twice (with a short delay, default `0.05s`) to correct late size-hint reapplication, then leaves windows in their row tiles.
+4. **Execution**: 
+    - Removes window size hints (`WM_NORMAL_HINTS`) to prevent terminal emulators from snapping to character-grid increments. 
+    - The `titlebars` script also creates a KWin rule for `strictgeometry=false`, which forces KWin to **permanently** ignore these hints. This prevents the windows from "snapping back" and creating large gaps after a screen lock or window focus event.
+    - It applies geometry twice (with a short delay, default `0.05s`) to correct late size-hint reapplication, then leaves windows in their row tiles.
 
 ## License
 

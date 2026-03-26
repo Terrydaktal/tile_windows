@@ -165,6 +165,10 @@ typesrule=2
 noborder=true
 noborderrule=2
 
+# Ignore character-grid size hints (strict geometry)
+strictgeometry=false
+strictgeometryrule=2
+
 """
 
 new_sections.append((new_idx, rule))
